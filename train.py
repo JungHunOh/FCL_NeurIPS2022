@@ -61,7 +61,7 @@ def get_command_line_parser():
     parser.add_argument('--query_new_lamb', type=float, default=1)
     parser.add_argument('--fc_lamb', type=float, default=1)
     parser.add_argument('--num_heads', type=int, default=3)
-    parser.add_argument('--freeze_epoch', type=int, default=95)
+    parser.add_argument('--freeze_epoch', type=int, default=200)
     parser.add_argument('--num_query_new', type=int, default=20)
     parser.add_argument('--num_query_base', type=int, default=10)
     parser.add_argument('--num_query_base_class', type=int, default=10)
