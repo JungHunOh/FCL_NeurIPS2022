@@ -25,6 +25,8 @@ class MYNET(Net):
                 self.feat_transformer = MultiHeadAttention(self.args.num_heads, hdim, hdim, hdim, dropout=0)
             if self.args.meta_sgd:
                 self.meta_sgd_params = nn.ParameterList([nn.Parameter(torch.ones(param.shape) * self.args.inner_lr, requires_grad=True) for param in self.proto_estimator.parameters()])
+        
+        self.fc.weight.data[60:] = self.fc.weight.data[60:] * 0
 
     def forward(self, input):
         if self.mode == 'encoder':
@@ -58,7 +60,7 @@ class MYNET(Net):
             target_label = label[w*5:(w+1)*5]
 
             inner_params = {name: param for name, param in self.proto_estimator.named_parameters()}
-
+            
             for i in range(self.args.inner_steps):
                 #estimated_proto = self.proto_estimator(transformed_feat, inner_params).squeeze()# + avg_feat[w] # [feat]
                 #estimated_proto = self.proto_estimator(target_data, inner_params).squeeze()# + avg_feat[w] # [feat]
@@ -76,8 +78,9 @@ class MYNET(Net):
 
                 output = self.args.temperature * F.linear(F.normalize(target_data, p=2, dim=-1), F.normalize(cur_fc, p=2, dim=-1))
 
-                contrastive_loss = F.linear(F.normalize(estimated_proto.unsqueeze(0), p=2, dim=-1), F.normalize(cur_fc[:class_list.min()+w], p=2, dim=-1)).mean()
-                loss = F.cross_entropy(output, target_label) + contrastive_loss * self.args.lamb_contrastive
+                contrastive_loss = F.linear(F.normalize(estimated_proto.unsqueeze(0), p=2, dim=-1), F.normalize(cur_fc[:class_list.min()+w], p=2, dim=-1))
+                contrastive_loss = torch.exp(contrastive_loss).mean()
+                loss = F.cross_entropy(output, target_label) * 0 + contrastive_loss * self.args.lamb_contrastive
 
                 #self.zero_grad()
                 #self.proto_estimator.zero_grad()
@@ -102,11 +105,11 @@ class MYNET(Net):
             #cur_fc = torch.cat([fc_weight, target_data], dim=0)
             estimated_proto = self.proto_estimator(target_data, fc_weight[:60], inner_params)
             #estimated_proto = self.proto_estimator(target_data, inner_params).squeeze()# + avg_feat[w]
-
             #estimated_proto = transformed_feat.mean(dim=0)
-            #estimated_proto = avg_feat[w]
             
             self.fc.weight.data[class_list.min()+w] = estimated_proto
+
+        return avg_feat
 
     def _forward(self,support,query,support_label=None,pseudo_proto=None,test=False,data_drop=True):
         if self.args.meta:
@@ -134,13 +137,28 @@ class MYNET(Net):
                 fc_weight_base = self.fc.weight[:60].detach().clone()
                 #fc_weight[60:60+num_pseudo_new_classes] = pseudo_proto
                 fc_weight_base = F.normalize(fc_weight_base, p=2, dim=-1)
-
+                
+                artificial = True
                 for w in range(self.args.low_way):
-                    rand_num = random.randint(0,num_pseudo_new_classes)
-                    rand_idx = sorted(random.sample(np.arange(num_pseudo_new_classes).tolist(),rand_num))
+                    if artificial:
+                        rand_num = self.args.num_plp#0#random.randint(0,num_pseudo_new_classes)
+                        rand_idx = sorted(random.choices(np.arange(60).tolist(), k= 60 * rand_num))
+                    else:
+                        rand_num = random.randint(0,num_pseudo_new_classes)
+                        rand_idx = sorted(random.sample(np.arange(num_pseudo_new_classes).tolist(), rand_num))
+
                     if rand_num > 0:
-                        fc_weight = torch.cat([fc_weight_base.clone(), pseudo_proto[rand_idx]], dim=0)
-                        pseudo_proto_list.append(pseudo_proto[rand_idx])
+                        kk = self.args.kk
+                        if artificial:
+                            plp_base = F.normalize(fc_weight_base[rand_idx] + (torch.rand(60 * rand_num, 64) * kk * 2 - kk).cuda())
+                            plp_new = F.normalize(avg_feat[w].unsqueeze(0) + (torch.rand(rand_num, 64) * kk * 2 - kk).cuda())
+                            plp = torch.cat([plp_base, plp_new], dim=0)
+                        else:
+                            plp = pseudo_proto[rand_idx]
+
+                        #rand_num = rand_num * 61
+                        fc_weight = torch.cat([fc_weight_base.clone(), plp], dim=0)
+                        pseudo_proto_list.append(plp)
                     else:
                         fc_weight = fc_weight_base.clone()
                         pseudo_proto_list.append(None)
@@ -175,13 +193,17 @@ class MYNET(Net):
 
                         output = self.args.temperature * F.linear(F.normalize(target_rot, p=2, dim=-1), F.normalize(cur_fc, p=2, dim=-1))
 
-                        contrastive_loss = F.linear(F.normalize(estimated_proto.unsqueeze(0), p=2, dim=-1), F.normalize(cur_fc[:60+num_pseudo_new_classes], p=2, dim=-1)).mean()
-                        
+                        contrastive_loss = F.linear(F.normalize(estimated_proto.unsqueeze(0), p=2, dim=-1), F.normalize(cur_fc[:60+rand_num], p=2, dim=-1))
+                        contrastive_loss = torch.exp(contrastive_loss)
+                        #if w == 4:
+                        #    print(contrastive_loss[0,60:].max(), contrastive_loss[0,60:].mean())
+
                         #loss = F.cross_entropy(output, target_label) + contrastive_loss * self.args.lamb_contrastive
                         c_loss = F.cross_entropy(output, target_label)
-                        loss = c_loss + contrastive_loss * self.args.lamb_contrastive
+                        loss = c_loss * 0 + contrastive_loss.mean() * self.args.lamb_contrastive
+                        
                         #if w == 4:
-                        #    print('1',contrastive_loss.item(), c_loss.item())
+                        #    print('1',contrastive_loss.max().item(), contrastive_loss.mean().item())
 
                         #if w == 0:
                         #    print(contrastive_loss)
@@ -308,7 +330,6 @@ class ProtoEstimator(nn.Module):
         #self.dropout = nn.Dropout(0.1)
 
     def forward(self, data, proto_base, params):
-
         relation_scores = F.linear(data, proto_base) # [5, 60]
 
         x = F.relu(F.linear(relation_scores, params['fc1.weight']))

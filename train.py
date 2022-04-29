@@ -65,6 +65,8 @@ def get_command_line_parser():
     parser.add_argument('--num_query_new', type=int, default=20)
     parser.add_argument('--num_query_base', type=int, default=10)
     parser.add_argument('--num_query_base_class', type=int, default=10)
+    parser.add_argument('--num_plp', type=int, default=500)
+    parser.add_argument('--kk', type=float, default=0.1)
 
 
     parser.add_argument('-start_session', type=int, default=0)

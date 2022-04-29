@@ -21,6 +21,7 @@ class FSCILTrainer(Trainer):
         self.set_save_path()
         self.args = set_up_datasets(self.args)
         self.set_up_model()
+        self.avg_feat = []
         pass
 
     def set_up_model(self):
@@ -412,7 +413,11 @@ class FSCILTrainer(Trainer):
                 self.model.eval()
                 trainloader.dataset.transform = testloader.dataset.transform
                 if self.args.meta:
-                    self.model.module.estimate_prototype(trainloader, np.unique(train_set.targets), session)
+                    avg_feat = self.model.module.estimate_prototype(trainloader, np.unique(train_set.targets), session)
+                    self.avg_feat.append(avg_feat)
+
+                    if session == 8:
+                        self.plot_diff_avg_est(torch.cat(self.avg_feat, dim=0))
                 else:
                     self.model.module.update_fc(trainloader, np.unique(train_set.targets), session)
 
@@ -444,10 +449,13 @@ class FSCILTrainer(Trainer):
         result_list.append('Total Acc.\n{}'.format(self.trlog['max_acc']))
         result_list.append('Base Acc.\n{}'.format(self.trlog['max_acc_base']))
         result_list.append('New Acc.\n{}'.format(self.trlog['max_acc_new']))
+        balanced_acc = ((np.array(self.trlog['max_acc_base'])+np.array(self.trlog['max_acc_new'])).round(2)/2).tolist()
+        result_list.append('Balanced ACC.\n{}'.format(balanced_acc))
         print('Best epoch:', self.trlog['max_acc_epoch'])
         print('Total Acc.\n',self.trlog['max_acc'])
         print('Base Acc.\n',self.trlog['max_acc_base'])
         print('New Acc.\n',self.trlog['max_acc_new'])
+        print('Balanced Acc.\n',balanced_acc)
         print('Total time used %.2f mins' % total_time)
         save_list_to_txt(os.path.join(args.save_path, 'results.txt'), result_list)
 
@@ -486,7 +494,7 @@ class FSCILTrainer(Trainer):
                 data_new, true_label_new = [_.cuda() for _ in batch_new] # This is for query_new, support and pseudo_new_class
                 
                 num_new_classes = 5
-                num_pseudo_new_classes = random.randint(20,39)
+                num_pseudo_new_classes = 0#random.randint(20,39)
                 num_whole = 5 + self.args.num_query_new + self.args.num_fullproto
                 index_new = np.tile(np.arange(num_new_classes), num_whole) + np.repeat(np.arange(num_whole)*45,num_new_classes)
                 index_pseudo_new = np.tile(np.arange(num_new_classes,num_new_classes+num_pseudo_new_classes),5 + self.args.num_query_new) + np.repeat(np.arange(5 + self.args.num_query_new)*45,num_pseudo_new_classes)
@@ -523,19 +531,19 @@ class FSCILTrainer(Trainer):
                 pseudo_tmp = deepcopy(
                     data_pseudo_new.reshape(5 + self.args.num_query_new, num_pseudo_new_classes, data_pseudo_new.shape[1], data_pseudo_new.shape[2], data_pseudo_new.shape[3])[:,
                     :num_pseudo_new_classes, :, :, :].flatten(0, 1))
-
-                # random choose rotate degree
+                
+                #random choose rotate degree
                 if self.args.fullproto:
                     proto_tmp, query_tmp, pseudo_tmp, full_tmp, selected_rots = self.replace_to_rotate(proto_tmp, query_tmp, pseudo_tmp, full_tmp) # proto [50, 3, 32, 32] query [200, 3, 32, 32]
                 else:
                     proto_tmp, query_tmp, pseudo_tmp, selected_rots = self.replace_to_rotate(proto_tmp, query_tmp, pseudo_tmp) # proto [50, 3, 32, 32] query [200, 3, 32, 32]
-
+                
                 if self.args.mixup:
                     if self.args.fullproto:
                         proto_tmp, query_tmp, pseudo_tmp, full_tmp = self.mixup(proto_tmp, query_tmp, pseudo_tmp, full_tmp)
                     else:
                         proto_tmp, query_tmp, pseudo_tmp, _ = self.mixup(proto_tmp, query_tmp, pseudo_tmp)
-                        
+                     
                 #proto_tmp: support, query_tmp: query_new, data: query_base
                 
                 model.eval()
@@ -665,12 +673,15 @@ class FSCILTrainer(Trainer):
                             num_cur_pseudo_new_classes = pseudo_proto_list[jj].shape[0]
                         else:
                             num_cur_pseudo_new_classes = 0
-
+                        
                         if num_cur_pseudo_new_classes > 0:
                             tmp = [self.model.module.fc.weight[:60], pseudo_proto_list[jj], estimated_proto[jj].unsqueeze(0)]
                         else:
                             tmp = [self.model.module.fc.weight[:60], estimated_proto[jj].unsqueeze(0)]
                         tmp = torch.cat(tmp, dim=0)
+
+                        #tmp = [self.model.module.fc.weight[:60], estimated_proto[jj].unsqueeze(0)]
+                        #tmp = torch.cat(tmp, dim=0)
 
                         output = self.args.temperature * F.linear(F.normalize(query[0], p=2, dim=-1), F.normalize(tmp, p=2, dim=-1))
                         loss_base = loss_base + F.cross_entropy(output, true_label)
@@ -682,7 +693,6 @@ class FSCILTrainer(Trainer):
                         tmp = torch.cat(tmp, dim=0)
 
                         output = self.args.temperature * F.linear(F.normalize(query[1][jj::5], p=2, dim=-1), F.normalize(tmp, p=2, dim=-1))
-
                         assert output.shape[-1] == 60 + num_cur_pseudo_new_classes + 1
                         
                         loss_new = loss_new + F.cross_entropy(output, query_label[0::5] + num_cur_pseudo_new_classes)
@@ -690,6 +700,7 @@ class FSCILTrainer(Trainer):
                         #loss = loss + F.cross_entropy(output, torch.cat([true_label, query_label[0::5]]))
                         contrastive_loss = 0#contrastive_loss + F.linear(estimated_proto[jj].unsqueeze(0), F.normalize(tmp[:60+num_cur_pseudo_new_classes].detach(), p=2, dim=-1)).mean()
 
+                    #print(proto_loss)
                     fc_loss = F.linear(F.normalize(self.model.module.fc.weight[:60],p=2,dim=-1), F.normalize(self.model.module.fc.weight[:60],p=2,dim=-1))
                     #print('1',fc_loss.min().item(), fc_loss.mean().item())
                     fc_loss = fc_loss.mean()
@@ -871,7 +882,14 @@ class FSCILTrainer(Trainer):
         with torch.no_grad():
             for i, batch in enumerate(testloader, 1):
                 data, test_label = [_.cuda() for _ in batch]
-
+                '''
+                from PIL import Image
+                tmp = data[0].cpu().numpy() * 255
+                
+                tmp = tmp.transpose().astype(np.uint8)
+                tmp = Image.fromarray(tmp)
+                tmp.save(f'cifar100_img/{test_label[0].item()}.png')
+                '''
                 if args.meta:
                     model.module.mode = 'encoder'
                     features = model(data)
@@ -954,6 +972,24 @@ class FSCILTrainer(Trainer):
         plt.savefig(f'{self.args.save_path}/cossim/session{session}.png')
         plt.cla()
         plt.clf()
+
+    def plot_diff_avg_est(self, avg_feat):
+        fc = self.model.module.fc.weight[60:]
+        fc = F.normalize(fc, dim=-1)
+        avg_feat = F.normalize(avg_feat, dim=-1)
+        cos = F.linear(fc, avg_feat)
+        cos = torch.diagonal(cos)
+        
+        cos = cos.detach().cpu().numpy()
+
+        import matplotlib.pyplot as plt
+        plt.ylim(0.8,1)
+        plt.bar(np.arange(60,100), cos)
+        os.makedirs(f'{self.args.save_path}/cos_avg_est', exist_ok=True)
+        plt.savefig(f'{self.args.save_path}/cos_avg_est/result.png')
+        plt.cla()
+        plt.clf()
+
 
     def set_save_path(self):
 
